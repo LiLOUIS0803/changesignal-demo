@@ -1,0 +1,34 @@
+# Module map: who owns which files.
+# A path ending in "/" matches everything under that folder; otherwise it must match the file exactly.
+# owner = GitHub username. The owner must be a collaborator, or the reviewer request will fail.
+# Before the session: replace wonlin91 and LiLOUIS0803 with the testers' GitHub usernames.
+modules:
+  - name: candidates
+    owner: wonlin91
+    paths:
+      - "pipeline/candidates.py"
+    interfaces: ["generate_candidates"]
+
+  - name: preprocess
+    owner: LiLOUIS0803
+    paths:
+      - "pipeline/preprocess.py"
+    interfaces: ["crop_regions", "pixel"]
+
+  - name: scoring
+    owner: LiLOUIS0803
+    paths:
+      - "pipeline/scoring.py"
+    interfaces: ["select_best", "similarity", "mean_brightness"]
+
+  - name: repo-setup
+    owner: LiLOUIS0803
+    paths:
+      - ".changesignal/"
+      - ".github/"
+      - "changesignal/"
+      - "requirements.txt"
+      - "run.py"
+      - "README.md"
+      - "data/"
+    interfaces: []

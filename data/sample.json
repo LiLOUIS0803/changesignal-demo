@@ -1,0 +1,14 @@
+{
+  "description": "Fake 200x120 grey image with five objects. We are looking for the cup (brightness ~195).",
+  "width": 200,
+  "height": 120,
+  "background": 10,
+  "query": {"label": "cup", "value": 195},
+  "blobs": [
+    {"label": "sticker", "x": 8,   "y": 8,  "w": 20, "h": 20, "value": 90},
+    {"label": "bowl",    "x": 20,  "y": 60, "w": 48, "h": 40, "value": 150},
+    {"label": "book",    "x": 40,  "y": 10, "w": 40, "h": 40, "value": 120},
+    {"label": "coin",    "x": 90,  "y": 12, "w": 16, "h": 24, "value": 60},
+    {"label": "cup",     "x": 120, "y": 10, "w": 36, "h": 40, "value": 195}
+  ]
+}
