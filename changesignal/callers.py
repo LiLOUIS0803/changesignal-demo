@@ -30,6 +30,17 @@ Known limits (results are "possible" callers, not proof, and some callers are mi
 - Only Python is analysed: callers in other languages, configs, notebooks or templates
   are not found, and files that fail to parse are skipped.
 - Test files (tests/, test_*.py, *_test.py, conftest.py) are not reported as callers.
+- Symbolic links, and files that resolve outside the scanned folder, are never read.
+- Only the PR head is scanned, so a call added on the base branch after the PR branched off
+  is not seen until the PR is updated from the base branch.
+- Deleting the last statement of a function when blank lines surround the gap may not mark
+  the function as changed.
+- A caller file is attributed to the first module whose path matches it; with overlapping
+  paths (`pkg/` and `pkg/report.py`) the more specific owner may not be suggested.
+- Imports are tracked per file, not per function: two functions importing different `load`s
+  can hide each other.
+Because of these limits, owners of possible callers are asked to review but are NOT required
+to sign off; only owners of touched paths are (see main.reconcile and CP1's human-AI boundary).
 """
 import ast
 import os
@@ -48,6 +59,8 @@ def is_test_file(path):
     name = parts[-1]
     return (bool(TEST_DIRS.intersection(parts[:-1])) or name.startswith("test_")
             or name.endswith("_test.py") or name == "conftest.py")
+
+
 FUNCTION_NODES = (ast.FunctionDef, ast.AsyncFunctionDef)
 _HUNK_HEADER = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@")
 
@@ -70,7 +83,7 @@ def find_callers(changed_files, modules, repo_root=".", patches=None, max_snippe
         module = _module_of(path, modules)
         if module is None:
             continue
-        source, tree = _parse(root / path)
+        source, tree = _parse(root, path)
         if tree is None:
             continue
         first_call = {}  # (target, symbol) -> first line it is called on
@@ -97,7 +110,7 @@ def _changed_targets(changed_files, modules, root, patches):
     for path in changed_files:
         if not path.endswith(".py"):
             continue
-        _, tree = _parse(root / path)
+        _, tree = _parse(root, path)
         if tree is None:  # deleted in this PR, unreadable, or not valid Python
             continue
         patch = patches.get(path)
@@ -111,24 +124,44 @@ def _changed_targets(changed_files, modules, root, patches):
 
 
 def _touched_lines(patch):
-    """New-file line numbers an edit touches: added lines, and both sides of a deletion."""
+    """New-file line numbers an edit touches.
+
+    Added lines count. A pure deletion (removed lines not followed by added lines) counts
+    the lines on both sides of the gap. A replacement (removed lines followed by added
+    lines) counts only the added lines, so replacing a line just below a function does
+    not mark that function as changed.
+    """
     touched = set()
     line = None  # number of the next line on the new side
+    deleting = False  # inside a run of removed lines not yet followed by "+"
+
+    def end_deletion():
+        nonlocal deleting
+        if deleting:
+            touched.update((line - 1, line))
+            deleting = False
+
     for text in patch.splitlines():
         header = _HUNK_HEADER.match(text)
         if header:
+            if line is not None:
+                end_deletion()
             start, count = int(header.group(1)), header.group(2)
             # In a pure-deletion hunk (+c,0) git names the line *before* the gap.
             line = start + 1 if count == "0" else start
         elif line is None or text.startswith("\\"):  # before first hunk / "\ No newline"
             continue
         elif text.startswith("+"):
+            deleting = False  # a replacement: the added lines mark the spot
             touched.add(line)
             line += 1
         elif text.startswith("-"):
-            touched.update((line - 1, line))
+            deleting = True
         else:  # context line
+            end_deletion()
             line += 1
+    if line is not None:
+        end_deletion()
     return touched
 
 
@@ -171,14 +204,21 @@ def _calls_to_targets(tree, path, targets):
                 methods.setdefault(symbol.split(".", 1)[1], []).append((target, symbol))
 
     for node in ast.walk(tree):
-        if not isinstance(node, ast.Call):
+        if isinstance(node, ast.Call):
+            callees = [node.func]
+        elif isinstance(node, (*FUNCTION_NODES, ast.ClassDef)):
+            # A bare decorator (`@authorize`, `@auth.authorize`) calls the imported function
+            # without an ast.Call node; `@authorize(...)` is already an ast.Call above.
+            callees = [d for d in node.decorator_list if not isinstance(d, ast.Call)]
+        else:
             continue
-        hit = _resolve(_dotted(node.func), module_aliases, names, targets)
-        if hit:
-            yield hit[0], hit[1], node.lineno
-        elif isinstance(node.func, ast.Attribute):
-            for target, symbol in methods.get(node.func.attr, []):
-                yield target, symbol, node.lineno
+        for callee in callees:
+            hit = _resolve(_dotted(callee), module_aliases, names, targets)
+            if hit:
+                yield hit[0], hit[1], callee.lineno
+            elif isinstance(node, ast.Call) and isinstance(callee, ast.Attribute):
+                for target, symbol in methods.get(callee.attr, []):
+                    yield target, symbol, node.lineno
 
 
 def _imports_of(tree, path, targets):
@@ -279,9 +319,14 @@ def _python_files(root):
                 yield (Path(folder) / name).relative_to(root).as_posix()
 
 
-def _parse(file):
-    """(source, ast) or (None, None) when the file is missing, unreadable or not valid Python."""
+def _parse(root, path):
+    """(source, ast) or (None, None) when the file is missing, unreadable, not valid Python,
+    a symbolic link, or resolves outside `root`. The PR head is untrusted: a link inside it
+    must not make us read files elsewhere on the runner."""
+    file = root / path
     try:
+        if file.is_symlink() or not file.resolve().is_relative_to(root.resolve()):
+            return None, None
         source = file.read_text(encoding="utf-8-sig")
         return source, ast.parse(source, filename=str(file))
     except (OSError, ValueError, SyntaxError, RecursionError):  # ValueError: bad encoding

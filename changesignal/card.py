@@ -12,6 +12,14 @@ from pathlib import Path
 MODEL = "claude-opus-5-5"
 PROMPT = (Path(__file__).parent / "prompts" / "impact_card.md").read_text(encoding="utf-8")
 MAX_DIFF_CHARS = 150_000  # beyond this we send the start of the diff and say so on the card
+MAX_ROWS = 25             # module table rows shown on the card; the rest are counted
+MAX_FIELD_CHARS = 600     # per AI-written text field
+MAX_CARD_CHARS = 60_000   # GitHub rejects comments over 65,536 characters
+
+try:  # rule-based reason check from issue #11 (changesignal/reason.py), used once it exists
+    from .reason import has_reason
+except ImportError:
+    has_reason = None
 
 CARD_SCHEMA = {
     "type": "object",
@@ -46,6 +54,9 @@ LABELS = {
         "reason": "Author's reason",
         "reason_ok": "Given in the PR description.",
         "reason_missing": ":warning: No reason given. Please explain in the PR description why this change is needed.",
+        "reason_unverified": "Not checked: the AI summary is unavailable, so we could not tell whether the description gives a reason.",
+        "more_rows": "…and {n} more (see the workflow run log).",
+        "cut": "_The card was too long and has been cut._",
         "modules": "Modules that may be affected",
         "cols": "| Module | Owner | How we know | Where |",
         "owned_path": "owned path (rule)",
@@ -66,6 +77,9 @@ LABELS = {
         "reason": "作者的理由",
         "reason_ok": "已寫在 PR 說明中。",
         "reason_missing": ":warning: 作者沒有說明為什麼需要這個修改，請在 PR 說明中補上。",
+        "reason_unverified": "未檢查：AI 摘要無法產生，無法判斷 PR 說明是否寫了理由。",
+        "more_rows": "…另有 {n} 筆（請看 workflow 執行紀錄）。",
+        "cut": "_影響卡太長，已截斷。_",
         "modules": "可能受影響的模組",
         "cols": "| 模組 | 負責人 | 判斷方式 | 位置 |",
         "owned_path": "負責的路徑（規則）",
@@ -138,9 +152,36 @@ def ai_draft(pr, affected, client=None):
         draft = json.loads(next(b.text for b in resp.content if b.type == "text"))
     except (StopIteration, json.JSONDecodeError):
         return None, "unreadable AI response"
+    if not _valid_draft(draft):
+        return None, "unreadable AI response"
     draft["_truncated"] = truncated
     draft["_model"] = getattr(resp, "model", MODEL)
     return draft, None
+
+
+def _valid_draft(d):
+    """The structured-output schema should guarantee this shape; check anyway, so a surprise
+    (e.g. `null`) leads to the card without AI parts instead of a crash."""
+    def strs(xs):
+        return isinstance(xs, list) and all(isinstance(x, str) for x in xs)
+    return (isinstance(d, dict) and isinstance(d.get("what_changed"), str)
+            and isinstance(d.get("reason_given"), bool)
+            and isinstance(d.get("impacts"), list)
+            and all(isinstance(i, dict) and all(isinstance(i.get(k), str) for k in ("module", "risk", "evidence"))
+                    for i in d["impacts"])
+            and strs(d.get("questions_for_owner")))
+
+
+def _plain(text, limit=MAX_FIELD_CHARS):
+    """Render AI-written text as one plain line, so it cannot open a code fence, a heading,
+    a table or HTML that would hide the rule-based part of the card."""
+    text = " ".join(str(text).split())
+    if len(text) > limit:
+        text = text[:limit - 1] + "…"
+    text = text.replace("<", "&lt;").replace(">", "&gt;").replace("|", "\\|")
+    if text[:1] in ("#", "-", "*", "+", "=", "`", "~", "\\") or text.split(".", 1)[0].isdigit():
+        text = "\\" + text  # would otherwise start a heading, list, code fence or numbered list
+    return text
 
 
 def _cell(text):
@@ -154,39 +195,49 @@ def build_card(pr, affected, client=None):
     L = _labels()
     draft, why_not = ai_draft(pr, affected, client)
 
-    reason_missing = not (pr.get("body") or "").strip()
-    if draft is not None and not draft.get("reason_given", True):
-        reason_missing = True
+    body = pr.get("body") or ""
+    if draft is not None:
+        reason = "given" if draft["reason_given"] else "missing"
+    elif has_reason is not None:
+        reason = "given" if has_reason(body) else "missing"
+    else:  # without the AI we only know that an empty description gives no reason
+        reason = "missing" if not body.strip() else "unverified"
+    reason_missing = reason == "missing"
 
     lines = [f"### {L['title']}", "", f"**{L['what']}** _({L['ai']})_"]
     if draft:
-        lines.append(draft["what_changed"])
+        lines.append(_plain(draft["what_changed"]))
         if draft.get("_truncated"):
             lines.append(f"> {L['truncated'].format(n=MAX_DIFF_CHARS)}")
     else:
         lines.append(f"_{L['no_ai'].format(why=why_not)}_")
 
-    lines += ["", f"**{L['reason']}**", L["reason_missing"] if reason_missing else L["reason_ok"],
-              "", f"**{L['modules']}**", ""]
+    reason_label = {"given": "reason_ok", "missing": "reason_missing", "unverified": "reason_unverified"}[reason]
+    lines += ["", f"**{L['reason']}**", L[reason_label], "", f"**{L['modules']}**", ""]
     if affected:
         lines += [L["cols"], "|---|---|---|---|"]
-        for a in affected:
+        for a in affected[:MAX_ROWS]:
             where = a.get("location") or ", ".join(f"`{f}`" for f in a.get("files", []))
             how = L.get(a["kind"], a["kind"])
             if a["kind"] == "possible_caller" and a.get("symbol"):
                 how += f": `{a['symbol']}`"
             lines.append(f"| {_cell(a['module'])} | @{a['owner']} | {how} | {_cell(where)} |")
+        if len(affected) > MAX_ROWS:
+            lines += ["", L["more_rows"].format(n=len(affected) - MAX_ROWS)]
     else:
         lines.append(L["none"])
 
     if draft and draft.get("impacts"):
         lines += ["", f"**{L['risks']}** _({L['ai']})_"]
         for i in draft["impacts"]:
-            lines.append(f"- **{i['module']}**: {i['risk']} ({i['evidence']})")
+            lines.append(f"- **{_plain(i['module'], 80)}**: {_plain(i['risk'])} ({_plain(i['evidence'], 200)})")
     if draft and draft.get("questions_for_owner"):
         lines += ["", f"**{L['questions']}** _({L['ai']})_"]
-        lines += [f"- [ ] {q}" for q in draft["questions_for_owner"][:3]]
+        lines += [f"- [ ] {_plain(q, 300)}" for q in draft["questions_for_owner"][:3]]
     if draft:
         lines += ["", f"<sub>{L['footer'].format(model=draft['_model'])}</sub>"]
 
-    return {"markdown": "\n".join(lines), "reason_missing": reason_missing}
+    markdown = "\n".join(lines)
+    if len(markdown) > MAX_CARD_CHARS:
+        markdown = markdown[:MAX_CARD_CHARS] + "\n\n" + L["cut"]
+    return {"markdown": markdown, "reason_missing": reason_missing}
