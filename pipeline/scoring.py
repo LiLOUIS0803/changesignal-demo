@@ -14,7 +14,9 @@ def similarity(crop, query_value):
 
 
 def select_best(image, boxes):
-    """Return the box whose crop is most similar to image["query"]["value"]."""
+    """Return the most similar box, or None when there are no candidates."""
+    if not boxes:
+        return None
     crops = crop_regions(image, boxes)
     scores = [similarity(crop, image["query"]["value"]) for crop in crops]
     best_box, _best_score = max(zip(boxes, scores), key=lambda pair: pair[1])

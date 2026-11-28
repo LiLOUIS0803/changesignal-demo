@@ -5,12 +5,13 @@ A box is a tuple (x1, y1, x2, y2): top-left corner inclusive, bottom-right exclu
 
 
 def generate_candidates(image):
-    """Return one candidate box per blob in the image, sorted left-to-right (then top-to-bottom).
-
-    The order is deterministic so that every later step sees the same list.
-    """
+    """Return boxes at least 32 pixels on both sides, in deterministic order."""
+    min_side = 32
     boxes = []
     for blob in image["blobs"]:
+        width, height = blob["w"], blob["h"]
+        if width < min_side or height < min_side:
+            continue
         x1, y1 = blob["x"], blob["y"]
-        boxes.append((x1, y1, x1 + blob["w"], y1 + blob["h"]))
+        boxes.append((x1, y1, x1 + width, y1 + height))
     return sorted(boxes)

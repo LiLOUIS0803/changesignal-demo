@@ -27,6 +27,9 @@ def main():
     best = select_best(image, boxes)
     print(f"Candidates: {len(boxes)}")
     print(f"Looking for: {image['query']['label']}")
+    if best is None:
+        print("No eligible candidate box.")
+        return
     print(f"Selected box: {best} -> {label_of(image, best)}")
 
 
