@@ -8,6 +8,7 @@ def generate_candidates(image):
     """Return one candidate box per blob in the image, sorted left-to-right (then top-to-bottom).
 
     The order is deterministic so that every later step sees the same list.
+    This list can include regions below the cropping size threshold.
     """
     boxes = []
     for blob in image["blobs"]:

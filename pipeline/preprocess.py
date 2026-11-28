@@ -17,6 +17,8 @@ def crop_regions(image, boxes):
     """
     crops = []
     for x1, y1, x2, y2 in boxes:
+        if x2 - x1 < 32 or y2 - y1 < 32:
+            continue
         crop = [[pixel(image, x, y) for x in range(x1, x2)] for y in range(y1, y2)]
         crops.append(crop)
     return crops
